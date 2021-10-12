@@ -42,11 +42,12 @@ from .utils.dataset import Dataset, Example
 from .utils.evaluation import Evaluator
 from .utils.vocab import Vocab, VocabEntry
 
-
 import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 # os.environ['GPU_DEBUG'] = '2'
 # from gpu_profile import gpu_profile
+
+import wandb
 
 
 def train(args):
@@ -65,6 +66,8 @@ def train(args):
 
     json.dump(config, open(os.path.join(work_dir, 'config.json'), 'w'), indent=2)
 
+    wandb.init(name=work_dir, project="DIRE", config=config, tags=['baseline'])
+
     model = RenamingModel.build(config)
     config = model.config
     model.train()
@@ -73,7 +76,7 @@ def train(args):
         model = model.cuda()
 
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(params, lr=0.001)
+    optimizer = torch.optim.Adam(params, lr=config['train']['lr'])
     nn_util.glorot_init(params)
 
     # set the padding index for embedding layers to zeros
@@ -101,9 +104,10 @@ def train(args):
         train_set_iter = train_set.batch_iterator(batch_size=batch_size,
                                                   return_examples=False,
                                                   config=config, progress=True, train=True,
-                                                  num_readers=config['train']['num_readers'], num_batchers=config['train']['num_batchers'])
+                                                  num_readers=config['train']['num_readers'],
+                                                  num_batchers=config['train']['num_batchers'])
         epoch += 1
-
+        wandb.log({"epoch": epoch})
         for batch in train_set_iter:
             train_iter += 1
             optimizer.zero_grad()
@@ -132,7 +136,7 @@ def train(args):
             if train_iter % log_every == 0:
                 print(f'[Learner] train_iter={train_iter} avg. loss={cum_loss / cum_examples}, '
                       f'{cum_examples} examples ({cum_examples / (time.time() - t_log)} examples/s)', file=sys.stderr)
-
+                wandb.log({"train_iter": train_iter, "loss": cum_loss / cum_examples})
                 cum_loss = cum_examples = 0.
                 t_log = time.time()
 
@@ -145,6 +149,15 @@ def train(args):
             eval_results = Evaluator.decode_and_evaluate(model, dev_set, config)
             # print(f'[Learner] Evaluation result ppl={ppl} (took {time.time() - t1}s)', file=sys.stderr)
             print(f'[Learner] Evaluation result {eval_results} (took {time.time() - t1}s)', file=sys.stderr)
+
+            wandb.log(dict(val_corpus_acc=eval_results['corpus_acc'],
+                           val_corpus_need_rename_acc=eval_results['corpus_need_rename_acc'],
+                           val_func_name_in_train_acc=eval_results['func_name_in_train_acc'],
+                           val_func_name_not_in_train_acc=eval_results['func_name_not_in_train_acc'],
+                           val_func_body_in_train_acc=eval_results['func_body_in_train_acc'],
+                           val_func_body_not_in_train_acc=eval_results['func_body_not_in_train_acc'])
+                      )
+
             dev_metric = eval_results['func_body_not_in_train_acc']['accuracy']
             # dev_metric = -ppl
             if len(history_accs) == 0 or dev_metric > max(history_accs):
@@ -157,15 +170,32 @@ def train(args):
                 if patience == max_patience:
                     print(f'[Learner] Reached max patience {max_patience}, exiting...', file=sys.stderr)
                     patience = 0
+                    test_in_exit(model, config)
                     exit()
 
             history_accs.append(dev_metric)
 
         if epoch == max_epoch:
             print(f'[Learner] Reached max epoch', file=sys.stderr)
+            test_in_exit(model, config)
             exit()
 
         t1 = time.time()
+
+
+def test_in_exit(model: RenamingModel, config: Dict):
+    # test
+    sys.setrecursionlimit(7000)
+    test_set = Dataset(config['data']['test_file'])
+    test_results = Evaluator.decode_and_evaluate(model, test_set, model.config)
+    wandb.log(dict(corpus_acc=test_results['corpus_acc'],
+                   corpus_need_rename_acc=test_results['corpus_need_rename_acc'],
+                   func_name_in_train_acc=test_results['func_name_in_train_acc'],
+                   func_name_not_in_train_acc=test_results['func_name_not_in_train_acc'],
+                   func_body_in_train_acc=test_results['func_body_in_train_acc'],
+                   func_body_not_in_train_acc=test_results['func_body_not_in_train_acc'])
+              )
+    print(test_results, file=sys.stderr)
 
 
 def test(args):
@@ -191,7 +221,8 @@ def test(args):
 
     print(eval_results, file=sys.stderr)
 
-    save_to = args['--save-to'] if args['--save-to'] else args['MODEL_FILE'] + f'.{test_set_path.split("/")[-1]}.decode_results.bin'
+    save_to = args['--save-to'] if args['--save-to'] else args[
+                                                              'MODEL_FILE'] + f'.{test_set_path.split("/")[-1]}.decode_results.bin'
     print(f'Save decode results to {save_to}', file=sys.stderr)
     pickle.dump(decode_results, open(save_to, 'wb'))
 

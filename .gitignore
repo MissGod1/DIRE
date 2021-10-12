@@ -1,2 +1,6 @@
 *__pycache__*
 *.pyc
+preprocessed_data
+vocab**
+.idea
+.vscode
